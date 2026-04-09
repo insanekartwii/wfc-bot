@@ -7,11 +7,15 @@ import { fmtHex, getColor, makeRequest, resolveModRestrictPermission } from "../
 const config = getConfig();
 
 const IKWID = 0x49;
+const MKVNID = 0x01;
+const NKGPID = 0x10;
 const NKWID = 0x00;
 
 export const PackOpts = [
     { name: "Insane Kart Wii", value: IKWID },
-    { name: "Nexus Kart Wii", value: NKWID}
+    { name: "Mario Kart Virtual Night", value: MKVNID },
+    { name: "Nitro Grand Prix", value: NKGPID },
+    { name: "Nexus Kart Wii", value: NKWID },
 ];
 
 export function packIDToName(packID: number) {
@@ -20,6 +24,10 @@ export function packIDToName(packID: number) {
         return "Insane Kart Wii";
     case NKWID:
         return "Nexus Kart Wii";
+    case NKGPID:
+        return "Nitro Grand Prix";
+    case MKVNID:
+        return "Mario Kart Virtual Night";
     default:
         return "Unknown Pack";
     }
@@ -38,7 +46,7 @@ async function sendHashResponseEmbed(owner: GuildMember | null, packID: number, 
         .addFields({ name: "Version", value: `${version}/${fmtHex(version)}` })
         .setTimestamp();
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
         const hashResponse = hashResponses[i];
 
         if (hashResponse)
@@ -65,37 +73,54 @@ interface HashResponse {
 
 function regionIdxToName(idx: number): string {
     switch (idx) {
-    case 0:
-        return "PAL";
-    case 1:
-        return "NTSCU";
-    case 2:
-        return "NTSCJ";
-    case 3:
-        return "NTSCK";
-    default:
-        return "Unknown Region";
+    case 0: return "PAL";
+    case 1: return "NTSCU";
+    case 2: return "NTSCJ";
+    case 3: return "NTSCK";
+    case 4: return "Kiosk Demo";
+    default: return "Unknown Region";
     }
 }
 
 function hash(buffer: Buffer): HashResponse[] {
-    const hashes: HashResponse[] = new Array(4);
+    const hashes: HashResponse[] = [];
 
-    // Credit rambo (https://github.com/EpicUsername12)
-    const regionSizes = [];
-    for (let i = 0; i < 4; i++) {
+    const regionSizes: number[] = [];
+    for (let i = 0; i < 5; i++) {
+        if (i * 4 + 4 > buffer.length) break;
         regionSizes.push(buffer.readUint32BE(i * 4));
     }
+    const validRegions = regionSizes
+        .map((size, idx) => ({ size, idx }))
+        .filter(r => r.size > 0);
 
-    for (let i = 0; i < 4; i++) {
-        if (regionSizes[i] === 0) {
+    const regionCount = validRegions.length;
+
+    for (let i = 0; i < regionSizes.length; i++) {
+        const sizeCurrent = regionSizes[i];
+
+        if (sizeCurrent === 0) {
             console.log("Region", regionIdxToName(i), "is empty");
             continue;
         }
+        const previousSizeSum = regionSizes
+            .slice(0, i)
+            .reduce((sum, size) => size > 0 ? sum + size : sum, 0);
 
-        const offset = 0x10 + regionSizes.slice(0, i).reduce((a, b) => a + b, 0);
+        const offset = (regionCount * 4) + previousSizeSum;
+        if (offset + 0x20 > buffer.length) {
+            console.log("Region", regionIdxToName(i), "header out of bounds, skipping");
+            continue;
+        }
+
         const header = buffer.subarray(offset, offset + 0x20);
-        const size = header.readUint32BE(0xc); // codeSize
+        const size = header.readUint32BE(0xc);
+
+        if (offset + 0x20 + size > buffer.length) {
+            console.log("Region", regionIdxToName(i), "data out of bounds, skipping");
+            continue;
+        }
+
         const data = buffer.subarray(offset + 0x20, offset + 0x20 + size);
 
         hashes[i] = {
@@ -138,10 +163,10 @@ async function set(interaction: ChatInputCommandInteraction<CacheType>) {
 
     const buffer = Buffer.from(await binaryResponse.arrayBuffer());
     let hashes;
+
     try {
         hashes = hash(buffer);
-    }
-    catch (e) {
+    } catch (e) {
         await interaction.reply({
             content: `Failed to calculate hashes for pack: ${packIDToName(packID)}, version: ${version}, error: ${e}`,
             flags: MessageFlags.Ephemeral,
@@ -150,7 +175,8 @@ async function set(interaction: ChatInputCommandInteraction<CacheType>) {
     }
 
     console.log(`Calculated hashes for ${packIDToName(packID)}, version ${version}`);
-    for (let i = 0; i < 4; i++) {
+
+    for (let i = 0; i < 5; i++) {
         const hashResponse = hashes[i];
         if (hashResponse)
             console.log(`Region: ${hashResponse.regionName}, Hash: ${hashResponse.hash}, Magic: ${hashResponse.magic}, Offset: ${hashResponse.offset}`);
@@ -165,14 +191,16 @@ async function set(interaction: ChatInputCommandInteraction<CacheType>) {
         hash_ntscu: hashes[1]?.hash ?? "",
         hash_ntscj: hashes[2]?.hash ?? "",
         hash_ntsck: hashes[3]?.hash ?? "",
+        hash_kiosk: hashes[4]?.hash ?? "",
         hash_pal: hashes[0]?.hash ?? "",
     });
 
     if (success) {
         await sendHashResponseEmbed(interaction.member as GuildMember | null, packID, version, hashes);
+
         let content = `Updated hashes for ${packIDToName(packID)}, version ${version}/${fmtHex(version)}`;
 
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 5; i++) {
             const hashResponse = hashes[i];
             if (hashResponse)
                 content += `\nRegion: ${hashResponse.regionName}, Hash: ${hashResponse.hash}, Magic: ${hashResponse.magic}, Offset: ${hashResponse.offset}`;
@@ -181,14 +209,15 @@ async function set(interaction: ChatInputCommandInteraction<CacheType>) {
         }
 
         console.log(`Successfully updated hashes for ${packIDToName(packID)}`);
+
         await interaction.reply({
             content: content,
             flags: MessageFlags.Ephemeral,
         });
-    }
-    else {
+    } else {
         const content = `Failed to update pack: ${packIDToName(packID)}, version: ${version}, error: ${res.Error ?? "no error message provided"}`;
         console.error(content);
+
         await interaction.reply({
             content: content,
             flags: MessageFlags.Ephemeral,
@@ -204,6 +233,7 @@ async function list(interaction: ChatInputCommandInteraction<CacheType>) {
     if (!success) {
         const content = `Failed to query hashes, error: ${res.Error ?? "no error message provided"}`;
         console.error(content);
+
         await interaction.reply({
             content: content,
             flags: MessageFlags.Ephemeral,
@@ -224,6 +254,7 @@ async function list(interaction: ChatInputCommandInteraction<CacheType>) {
         for (const versionStr in versions) {
             const version = Number.parseInt(versionStr);
             const regions = versions[versionStr];
+
             value += `Version ${version}/${fmtHex(version)}\n`;
 
             for (const region in regions) {
@@ -277,14 +308,15 @@ async function del(interaction: ChatInputCommandInteraction<CacheType>) {
 
     if (success) {
         await sendDelEmbed(interaction.member as GuildMember | null, packID, version);
+
         await interaction.reply({
             content: `Successful hash deletion performed on pack: ${packIDToName(packID)}, version: ${version}/${fmtHex(version)}`,
             flags: MessageFlags.Ephemeral,
         });
-    }
-    else {
+    } else {
         const content = `Failed to delete hash for pack: ${packIDToName(packID)}, version: ${version}/${fmtHex(version)}, error: ${res.Error ?? "no error message provided"}`;
         console.error(content);
+
         await interaction.reply({
             content: content,
             flags: MessageFlags.Ephemeral,
